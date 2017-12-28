@@ -6,6 +6,8 @@
 #include <assert.h>
 #include <unistd.h>
 
+#include "struct_printer.h"
+
 typedef int8_t int8;
 typedef int16_t int16;
 typedef int32_t int32;
@@ -18,93 +20,37 @@ typedef uint32_t uint32;
 typedef uint64_t uint64;
 typedef unsigned int uint;
 
-FILE* open_write_file_or_crash(char* filename) {
-    if(access(filename, F_OK) == 0) {
-        printf("File: '%s' already exists. \n\tOverride? [y/N]\n", filename);
-        char ans = getchar();
-        if(ans != 'y' && ans != 'Y') {
-            exit(1);
-        }
-    }
 
-    FILE* result = fopen(filename, "w");
-    assert(result);
+tokenizer_data_t init_tokenizer(char* input) {
+    tokenizer_data_t result;
+    result.input_stream = input;
+    result.current_token_index = 0;
 
-    return result;
-}
-
-FILE* open_read_file_or_crash(char* filename) {
-    FILE* result = fopen(filename, "r");
-    if(result) {
-        return result;
-    }
-
-    if(access(filename, F_OK) != 0) {
-        fprintf(stderr, "File: '%s' does not exist.\n", filename);
-    } else {
-        fprintf(stderr, "Could not open file: '%s'.\n", filename);
-    }
-    exit(1);
-}
-
-char* read_entire_file(FILE* file) {
-    size_t capacity = 4096;
-    size_t offset = 0;
-    char* result = (char*) malloc(capacity);
-    assert(result);
-
-    while(!feof(file)) {
-        // Space in running out. Realloc.
-        if(capacity - offset < 128) {
-            capacity *= 2;
-            result = (char*) realloc(result, capacity);
-            assert(result);
-        }
-
-        char* write_ptr = result + offset;
-        if(!fgets(write_ptr, capacity - offset, file)) { break; }
-        offset += strlen(write_ptr);
+    for(int i = 0; i < TOKEN_BUFFER_SIZE; i++) {
+        result.token_buffer[i] = _next_token(input);
     }
 
     return result;
 }
 
-typedef enum {
-    TK_ID = 256,
-    TK_NUM,
-    TK_STRUCT,
-    TK_UNION,
-    TK_ENUM,
-    TK_TYPEDEF,
-    TK_EOF,
-} token_type_t;
+token_t look_ahead(tokenizer_data_t* data, int ahead) {
+    assert(ahead < TOKEN_BUFFER_SIZE);
 
-typedef struct {
-    token_type_t token_type;
-    char* token_str;
-    size_t len;
-} token_t;
-
-#define TOKEN_BUFFER_SIZE 8
-typedef struct {
-    char* input_stream;
-
-    token_t token_buffer[TOKEN_BUFFER_SIZE];
-    int current_token_index;
-} tokenizer_data_t;
-
-bool ignored(char c) {
-    return c == ' ' || c == '\t' || c == '\n';
+    int index = (data->current_token_index + ahead) % TOKEN_BUFFER_SIZE;
+    return data->token_buffer[index];
 }
 
-bool is_num(char c) {
-    return c >= '0' && c <= '9';
+token_t current_token(tokenizer_data_t* data) {
+    return data->token_buffer[data->current_token_index];
 }
 
-bool is_alpha(char c) {
-    // NOTE(erick): We can simplify this using and bitwise 'and' (or an 'or').
-    return (c >= 'a' && c <= 'z') ||
-        (c >= 'A' && c <= 'Z');
+token_t advance_token(tokenizer_data_t* data) {
+    // We will advance the circular buffer. The current index will become the
+    // end of the buffer, so we read a new token to this position.
+    data->token_buffer[data->current_token_index] = _next_token(data->input_stream);
+
+    data->current_token_index = (data->current_token_index + 1) % TOKEN_BUFFER_SIZE;
+    return current_token(data);
 }
 
 token_t _next_token(char* data) {
@@ -212,88 +158,8 @@ token_t _next_token(char* data) {
         return result;
     }
 
-    fprintf(stderr, "Unidentified token at:\n%.*s", 10, read_ptr);
+    fprintf(stderr, "Unidentified token at:\n%.*s", ERROR_LOCATION_LEN, read_ptr);
     exit(2);
-}
-
-tokenizer_data_t init_tokenizer(char* input) {
-    tokenizer_data_t result;
-    result.input_stream = input;
-    result.current_token_index = 0;
-
-    for(int i = 0; i < TOKEN_BUFFER_SIZE; i++) {
-        result.token_buffer[i] = _next_token(input);
-    }
-
-    return result;
-}
-
-token_t look_ahead(tokenizer_data_t* data, int ahead) {
-    assert(ahead < TOKEN_BUFFER_SIZE);
-
-    int index = (data->current_token_index + ahead) % TOKEN_BUFFER_SIZE;
-    return data->token_buffer[index];
-}
-
-token_t current_token(tokenizer_data_t* data) {
-    return data->token_buffer[data->current_token_index];
-}
-
-token_t advance_token(tokenizer_data_t* data) {
-    // We will advance the circular buffer. The current index will become the
-    // end of the buffer, so we read a new token to this position.
-    data->token_buffer[data->current_token_index] = _next_token(data->input_stream);
-
-    data->current_token_index = (data->current_token_index + 1) % TOKEN_BUFFER_SIZE;
-    return current_token(data);
-}
-
-void fprint_token(FILE* file, token_t token) {
-    switch(token.token_type) {
-    case TK_TYPEDEF :
-        fprintf(file, "TYPEDEF\n");
-        break;
-
-    case TK_STRUCT :
-        fprintf(file, "STRUCT\n");
-        break;
-
-    case TK_UNION :
-        fprintf(file, "UNION\n");
-        break;
-
-    case TK_ENUM :
-        fprintf(file, "ENUM\n");
-        break;
-
-    case TK_ID :
-        fprintf(file, "ID: %.*s\n", (int) token.len, token.token_str);
-        break;
-
-    default:
-        fprintf(file, "%c\n", token.token_type);
-    }
-}
-
-token_t token_from_type(token_type_t type) {
-    token_t result;
-    result.token_type = type;
-
-    return result;
-}
-
-void expect(token_type_t expected, token_t value) {
-    if(expected != value.token_type) {
-        token_t expected_token = token_from_type(expected);
-
-        fprintf(stderr, "Expected : ");
-        fprint_token(stderr, expected_token);
-        fprintf(stderr, "Got: ");
-        fprint_token(stderr, value);
-
-        fprintf(stderr, "At: %s\n", value.token_str);
-        exit(3);
-    }
 }
 
 void parse_declaration(tokenizer_data_t* tokenizer,
@@ -310,12 +176,6 @@ void parse_declaration(tokenizer_data_t* tokenizer,
 }
 
 void parse_struct_or_union(tokenizer_data_t* tokenizer) {
-    printf("In\n");
-    // char tmp[101];
-    // strncpy(tmp, last_location, 100);
-    // tmp[100] = 0;
-    // printf("Struct: \n\t%s\n", tmp);
-
     token_t token;
     bool struct_end = false;
 
@@ -333,7 +193,6 @@ void parse_struct_or_union(tokenizer_data_t* tokenizer) {
 
         if(token.token_type == '}') { struct_end = true; }
 
-        // NOTE(erick): Sub-struct
         else if(token.token_type == TK_ID) {
             parse_declaration(tokenizer, true);
             token = advance_token(tokenizer);
@@ -342,13 +201,15 @@ void parse_struct_or_union(tokenizer_data_t* tokenizer) {
 
         else if(token.token_type == TK_STRUCT ||
                 token.token_type == TK_UNION) {
-            // TODO(erick): We need a look-around to solve this more cleanly.
+
             token_t one_ahead = look_ahead(tokenizer, 1);
+            // NOTE(erick): Sub-struct
             if(one_ahead.token_type == '{') {
                 parse_struct_or_union(tokenizer);
 
             } else if(one_ahead.token_type == TK_ID) {
                 token_t two_ahead = look_ahead(tokenizer, 2);
+                // NOTE(erick): Sub-struct
                 if(two_ahead.token_type == '{') {
                     parse_struct_or_union(tokenizer);
                 } else {
@@ -356,20 +217,19 @@ void parse_struct_or_union(tokenizer_data_t* tokenizer) {
                 }
 
             } else {
-                fprintf(stderr, "Unexpected token at: %.*s\n", 10,
+                fprintf(stderr, "Unexpected token at: %.*s\n", ERROR_LOCATION_LEN,
                         one_ahead.token_str);
-            exit(3);
+                exit(3);
             }
 
             token = advance_token(tokenizer);
             expect(';', token);
         } else {
-            fprintf(stderr, "Unexpected token at: %.*s\n", 10, token.token_str);
+            fprintf(stderr, "Unexpected token at: %.*s\n", ERROR_LOCATION_LEN,
+                    token.token_str);
             exit(3);
         }
     }
-
-    printf("Out\n");
 }
 
 void parse_file(char* data) {
@@ -494,4 +354,117 @@ int main(int argc, char** argv) {
     fclose(output_c_file);
 
     return 0;
+}
+
+char* read_entire_file(FILE* file) {
+    size_t capacity = 4096;
+    size_t offset = 0;
+    char* result = (char*) malloc(capacity);
+    assert(result);
+
+    while(!feof(file)) {
+        // Space in running out. Realloc.
+        if(capacity - offset < 128) {
+            capacity *= 2;
+            result = (char*) realloc(result, capacity);
+            assert(result);
+        }
+
+        char* write_ptr = result + offset;
+        if(!fgets(write_ptr, capacity - offset, file)) { break; }
+        offset += strlen(write_ptr);
+    }
+
+    return result;
+}
+
+FILE* open_write_file_or_crash(char* filename) {
+    if(access(filename, F_OK) == 0) {
+        printf("File: '%s' already exists. \n\tOverride? [y/N]\n", filename);
+        char ans = getchar();
+        if(ans != 'y' && ans != 'Y') {
+            exit(1);
+        }
+    }
+
+    FILE* result = fopen(filename, "w");
+    assert(result);
+
+    return result;
+}
+
+FILE* open_read_file_or_crash(char* filename) {
+    FILE* result = fopen(filename, "r");
+    if(result) {
+        return result;
+    }
+
+    if(access(filename, F_OK) != 0) {
+        fprintf(stderr, "File: '%s' does not exist.\n", filename);
+    } else {
+        fprintf(stderr, "Could not open file: '%s'.\n", filename);
+    }
+    exit(1);
+}
+
+token_t token_from_type(token_type_t type) {
+    token_t result;
+    result.token_type = type;
+
+    return result;
+}
+
+void expect(token_type_t expected, token_t value) {
+    if(expected != value.token_type) {
+        token_t expected_token = token_from_type(expected);
+
+        fprintf(stderr, "Expected : ");
+        fprint_token(stderr, expected_token);
+        fprintf(stderr, "Got: ");
+        fprint_token(stderr, value);
+
+        fprintf(stderr, "At: %s\n", value.token_str);
+        exit(3);
+    }
+}
+
+void fprint_token(FILE* file, token_t token) {
+    switch(token.token_type) {
+    case TK_TYPEDEF :
+        fprintf(file, "TYPEDEF\n");
+        break;
+
+    case TK_STRUCT :
+        fprintf(file, "STRUCT\n");
+        break;
+
+    case TK_UNION :
+        fprintf(file, "UNION\n");
+        break;
+
+    case TK_ENUM :
+        fprintf(file, "ENUM\n");
+        break;
+
+    case TK_ID :
+        fprintf(file, "ID: %.*s\n", (int) token.len, token.token_str);
+        break;
+
+    default:
+        fprintf(file, "%c\n", token.token_type);
+    }
+}
+
+bool ignored(char c) {
+    return c == ' ' || c == '\t' || c == '\n';
+}
+
+bool is_num(char c) {
+    return c >= '0' && c <= '9';
+}
+
+bool is_alpha(char c) {
+    // NOTE(erick): We can simplify this using and bitwise 'and' (or an 'or').
+    return (c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z');
 }
