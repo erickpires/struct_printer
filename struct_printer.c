@@ -18,12 +18,11 @@ typedef uint32_t uint32;
 typedef uint64_t uint64;
 typedef unsigned int uint;
 
-
 FILE* open_write_file_or_crash(char* filename) {
     if(access(filename, F_OK) == 0) {
         printf("File: '%s' already exists. \n\tOverride? [y/N]\n", filename);
         char ans = getchar();
-        if(ans != 'y' || ans != 'Y') {
+        if(ans != 'y' && ans != 'Y') {
             exit(1);
         }
     }
@@ -69,6 +68,143 @@ char* read_entire_file(FILE* file) {
 
     return result;
 }
+
+typedef enum {
+    TK_ID = 256,
+    TK_NUM,
+    TK_STRUCT,
+    TK_ENUM,
+    TK_TYPEDEF,
+    TK_EOF,
+} token_t;
+
+bool ignored(char c) {
+    return c == ' ' || c == '\t' || c == '\n';
+}
+
+bool is_num(char c) {
+    return c >= '0' && c <= '9';
+}
+
+bool is_alpha(char c) {
+    // NOTE(erick): We can simplify this using and bitwise 'and' (or an 'or').
+    return (c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z');
+}
+
+token_t next_token(char* data, char* token_str) {
+    static int current_index = 0;
+
+    bool should_ignore;
+    do {
+        if(data[current_index] == '\0') { break; }
+
+        should_ignore = false;
+        while(ignored(data[current_index])) {
+            current_index++;
+            should_ignore = true;
+        }
+        // Line comment
+        if(data[current_index] == '/' &&data[current_index + 1] == '/') {
+            current_index += 2;
+            while(data[current_index] != '\n' && data[current_index] != '\0') {
+                current_index++;
+            }
+            should_ignore = true;
+        }
+        //Block comment
+        if(data[current_index] == '/' &&data[current_index + 1] == '*') {
+            current_index += 2;
+            while(data[current_index] != '\0' &&
+                  !(data[current_index] == '*' && data[current_index + 1] == '/')) {
+                current_index++;
+            }
+
+            if(data[current_index] != '\0') { current_index++; }
+            if(data[current_index] != '\0') { current_index++; }
+
+            should_ignore = true;
+        }
+    } while(should_ignore);
+
+    char current_char = data[current_index];
+    if(current_char == '\0') { return TK_EOF; }
+
+    if(current_char == '{' ||
+       current_char == '}' ||
+       current_char == '*' ||
+       current_char == ';' ||
+       current_char == '[' ||
+       current_char == ']' ||
+       current_char == ',') {
+        current_index++;
+        return current_char;
+    }
+
+    char* read_ptr = data + current_index;
+    if(strstr(read_ptr, "struct") == read_ptr) {
+        current_index += strlen("struct");
+        return TK_STRUCT;
+    }
+
+    if(strstr(read_ptr, "typedef") == read_ptr) {
+        current_index += strlen("typedef");
+        return TK_TYPEDEF;
+    }
+
+    if(strstr(read_ptr, "enum") == read_ptr) {
+        current_index += strlen("enum");
+        return TK_ENUM;
+    }
+
+    if(is_alpha(current_char) || current_char == '_') {
+        do {
+            current_index++;
+        } while(is_alpha(data[current_index]) ||
+                data[current_index] == '_' ||
+                is_num(data[current_index]));
+        size_t len = data + current_index - read_ptr;
+
+        strncpy(token_str, read_ptr, len);
+        token_str[len] = '\0';
+
+        return TK_ID;
+    }
+
+    read_ptr[10] = '\0';
+    fprintf(stderr, "Unidentified token at:\n%s", read_ptr);
+    exit(2);
+}
+
+void parse_file(char* data) {
+    token_t token;
+    char token_str[1024];
+
+    while((token = next_token(data, token_str)) != TK_EOF) {
+        switch(token) {
+        case TK_TYPEDEF :
+            printf("TYPEDEF\n");
+            break;
+
+        case TK_STRUCT :
+            printf("STRUCT\n");
+            break;
+
+        case TK_ENUM :
+            printf("ENUM\n");
+            break;
+
+        case TK_ID :
+            printf("ID: %s\n", token_str);
+            break;
+
+        default:
+            printf("%c\n", token);
+        }
+
+    }
+}
+
 
 int main(int argc, char** argv) {
     char* input_filename = NULL;
@@ -146,14 +282,15 @@ int main(int argc, char** argv) {
     }
 
     if(prefix_file_filename) {
-        printf("%s\n", prefix_data);
+        fprintf(output_c_file, "%s\n", prefix_data);
     }
-
-    printf("%s\n", input_data);
+    parse_file(input_data);
 
     if(suffix_file_filename) {
-        printf("%s\n", suffix_data);
+        fprintf(output_c_file, "%s\n", suffix_data);
     }
+
+    fclose(output_c_file);
 
     return 0;
 }
