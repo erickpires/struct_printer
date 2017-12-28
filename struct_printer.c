@@ -20,11 +20,42 @@ typedef uint32_t uint32;
 typedef uint64_t uint64;
 typedef unsigned int uint;
 
+typedef struct {
+    void* data_ptr;
+    size_t current_offset;
+    size_t capacity;
+} array_allocator_t;
+
+array_allocator_t array_allocator_create() {
+    array_allocator_t result;
+    size_t total_capacity = 2 * sizeof(Struct);
+
+    result.data_ptr = malloc(total_capacity);
+    assert(result.data_ptr);
+
+    result.current_offset = 0;
+    result.capacity = total_capacity;
+
+    return result;
+}
+
+void *array_allocator_alloc(array_allocator_t* allocator, size_t size) {
+    if(allocator->current_offset + size >= allocator->capacity) {
+        allocator->capacity *= 2;
+        allocator->data_ptr = realloc(allocator->data_ptr, allocator->capacity);
+        assert(allocator->data_ptr);
+    }
+
+    void* result = allocator->data_ptr + allocator->current_offset;
+    allocator->current_offset += size;
+    return result;
+}
 
 tokenizer_data_t init_tokenizer(char* input) {
     tokenizer_data_t result;
     result.input_stream = input;
-    result.current_token_index = 0;
+    // NOTE(erick): The tokenizer must start at index: -1.
+    result.current_token_index = TOKEN_BUFFER_SIZE - 1;
 
     for(int i = 0; i < TOKEN_BUFFER_SIZE; i++) {
         result.token_buffer[i] = _next_token(input);
@@ -56,7 +87,7 @@ token_t advance_token(tokenizer_data_t* data) {
 token_t _next_token(char* data) {
     static int current_index = 0;
 
-    token_t result;
+    token_t result = {0} ;
 
     if(data[current_index] == '\0') {
         result.token_type = TK_EOF;
@@ -113,33 +144,52 @@ token_t _next_token(char* data) {
        current_char == ')' ||
        current_char == ',') {
 
-        current_index++;
         result.token_type = current_char;
+        result.token_str = data + current_index;
+        result.len = 1;
+
+        current_index++;
         return result;
     }
 
     char* read_ptr = data + current_index;
     if(strstr(read_ptr, "struct") == read_ptr) {
-        current_index += strlen("struct");
+        size_t len = strlen("struct");
         result.token_type = TK_STRUCT;
+        result.token_str = data + current_index;
+        result.len = len;
+
+        current_index += len;
         return result;
     }
 
     if(strstr(read_ptr, "union") == read_ptr) {
-        current_index += strlen("union");
+        size_t len = strlen("union");
         result.token_type = TK_UNION;
+        result.token_str = data + current_index;
+        result.len = len;
+
+        current_index += len;
         return result;
     }
 
     if(strstr(read_ptr, "typedef") == read_ptr) {
-        current_index += strlen("typedef");
+        size_t len = strlen("typedef");
         result.token_type = TK_TYPEDEF;
+        result.token_str = data + current_index;
+        result.len = len;
+
+        current_index += len;
         return result;
     }
 
     if(strstr(read_ptr, "enum") == read_ptr) {
-        current_index += strlen("enum");
+        size_t len = strlen("enum");
         result.token_type = TK_ENUM;
+        result.token_str = data + current_index;
+        result.len = len;
+
+        current_index += len;
         return result;
     }
 
@@ -162,39 +212,85 @@ token_t _next_token(char* data) {
     exit(2);
 }
 
-void parse_declaration(tokenizer_data_t* tokenizer,
-                       bool first_token_already_consumed) {
-    token_t token;
-    do {
-        token = advance_token(tokenizer);
-        if(token.token_type == TK_ID) {
-            printf("Field: %.*s\n", (int) token.len, token.token_str);
-        }
+Decl parse_declaration(tokenizer_data_t* tokenizer) {
+    Decl result = {0};
+    token_t token = current_token(tokenizer);
 
-        token = look_ahead(tokenizer, 1);
-    } while(token.token_type != ';');
+    array_allocator_t ids_allocator = array_allocator_create();
+
+    while(true) {
+        if(token.token_type == TK_ID ||
+           token.token_type == TK_STRUCT ||
+           token.token_type == TK_UNION) {
+            Id* id_ptr = array_allocator_alloc(&ids_allocator, sizeof(Id));
+
+            id_ptr->str = token.token_str;
+            id_ptr->len = token.len;
+            result.ids_count++;
+        } else if(token.token_type == '*') {
+            result.is_pointer = true;
+            // TODO(erick): Multidimensional arrays are not supported.
+        } else if(token.token_type == '[') {
+            result.is_array = true;
+            token = advance_token(tokenizer);
+            if(token.token_type == TK_ID ||
+               token.token_type == TK_NUM) {
+
+                result.array_size.str = token.token_str;
+                result.array_size.len = token.len;
+            } else { unexpected_token(token); }
+
+            token = advance_token(tokenizer);
+            expect(']', token);
+        } else { unexpected_token(token); }
+
+        if(look_ahead(tokenizer, 1).token_type == ';') { break; }
+
+        token = advance_token(tokenizer);
+    }
+
+    result.ids = ids_allocator.data_ptr;
+
+    return result;
 }
 
-void parse_struct_or_union(tokenizer_data_t* tokenizer) {
-    token_t token;
-    bool struct_end = false;
+Struct parse_struct_or_union(tokenizer_data_t* tokenizer) {
+    Struct result = {0};
+
+    array_allocator_t decls_allocator = array_allocator_create();
+    array_allocator_t nested_structs_allocator = array_allocator_create();
+
+    token_t token = current_token(tokenizer);
+    if(token.token_type == TK_STRUCT){}
+    else if(token.token_type == TK_UNION) {result.is_union = true; }
+    else { unexpected_token(token); }
 
     token = advance_token(tokenizer);
     // NOTE(erick): named struct
     if(token.token_type == TK_ID) {
         printf("Struct name: %.*s\n", (int) token.len, token.token_str);
+
+        result.is_named_struct = true;
+        result.struct_name.str = token.token_str;
+        result.struct_name.len = token.len;
+
         token = advance_token(tokenizer);
     }
 
     expect('{', token);
 
-    while(!struct_end) {
+    while(true) {
         token = advance_token(tokenizer);
 
-        if(token.token_type == '}') { struct_end = true; }
+        if(token.token_type == '}') { break; }
 
         else if(token.token_type == TK_ID) {
-            parse_declaration(tokenizer, true);
+            Decl decl = parse_declaration(tokenizer);
+
+            Decl* decl_ptr = array_allocator_alloc(&decls_allocator, sizeof(Decl));
+            *decl_ptr = decl;
+            result.decls_count++;
+
             token = advance_token(tokenizer);
             expect(';', token);
         }
@@ -205,34 +301,42 @@ void parse_struct_or_union(tokenizer_data_t* tokenizer) {
             token_t one_ahead = look_ahead(tokenizer, 1);
             // NOTE(erick): Sub-struct
             if(one_ahead.token_type == '{') {
-                parse_struct_or_union(tokenizer);
-
+                Struct s = parse_struct_or_union(tokenizer);
+                Struct* struct_ptr = array_allocator_alloc(&nested_structs_allocator,
+                                                           sizeof(Struct));
+                *struct_ptr = s;
+                result.nested_structs_or_unions_count++;
             } else if(one_ahead.token_type == TK_ID) {
                 token_t two_ahead = look_ahead(tokenizer, 2);
                 // NOTE(erick): Sub-struct
                 if(two_ahead.token_type == '{') {
                     parse_struct_or_union(tokenizer);
                 } else {
-                    parse_declaration(tokenizer, true);
+                    Decl decl = parse_declaration(tokenizer);
+                    Decl* decl_ptr = array_allocator_alloc(&decls_allocator,
+                                                           sizeof(Decl));
+                    *decl_ptr = decl;
+                    result.decls_count++;
                 }
 
-            } else {
-                fprintf(stderr, "Unexpected token at: %.*s\n", ERROR_LOCATION_LEN,
-                        one_ahead.token_str);
-                exit(3);
-            }
+            } else { unexpected_token(one_ahead); }
 
             token = advance_token(tokenizer);
             expect(';', token);
-        } else {
-            fprintf(stderr, "Unexpected token at: %.*s\n", ERROR_LOCATION_LEN,
-                    token.token_str);
-            exit(3);
-        }
+        } else { unexpected_token(token); }
     }
+
+    result.decls = decls_allocator.data_ptr;
+    result.nested_structs_or_unions = nested_structs_allocator.data_ptr;
+
+    return result;
 }
 
-void parse_file(char* data) {
+Defs parse_file(char* data) {
+    Defs result = {0};
+
+    array_allocator_t structs_allocator = array_allocator_create();
+
     tokenizer_data_t tokenizer = init_tokenizer(data);
     token_t token;
 
@@ -243,7 +347,11 @@ void parse_file(char* data) {
             if(token.token_type == TK_STRUCT ||
                token.token_type == TK_UNION)  {
 
-                parse_struct_or_union(&tokenizer);
+                Struct s = parse_struct_or_union(&tokenizer);
+                Struct* struct_ptr = array_allocator_alloc(&structs_allocator,
+                                                           sizeof(Struct));
+                *struct_ptr = s;
+                result.structs_count++;
 
                 // Typedef'd name.
                 token = advance_token(&tokenizer);
@@ -264,6 +372,9 @@ void parse_file(char* data) {
             }
         }
     }
+
+    result.structs = structs_allocator.data_ptr;
+    return result;
 }
 
 
@@ -345,6 +456,7 @@ int main(int argc, char** argv) {
     if(prefix_file_filename) {
         fprintf(output_c_file, "%s\n", prefix_data);
     }
+
     parse_file(input_data);
 
     if(suffix_file_filename) {
@@ -426,6 +538,12 @@ void expect(token_type_t expected, token_t value) {
         fprintf(stderr, "At: %s\n", value.token_str);
         exit(3);
     }
+}
+
+void unexpected_token(token_t token) {
+    fprintf(stderr, "Unexpected token at: %.*s\n", ERROR_LOCATION_LEN,
+            token.token_str);
+    exit(3);
 }
 
 void fprint_token(FILE* file, token_t token) {
