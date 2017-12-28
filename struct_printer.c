@@ -85,6 +85,14 @@ typedef struct {
     size_t len;
 } token_t;
 
+#define TOKEN_BUFFER_SIZE 8
+typedef struct {
+    char* input_stream;
+
+    token_t token_buffer[TOKEN_BUFFER_SIZE];
+    int current_token_index;
+} tokenizer_data_t;
+
 bool ignored(char c) {
     return c == ' ' || c == '\t' || c == '\n';
 }
@@ -99,9 +107,15 @@ bool is_alpha(char c) {
         (c >= 'A' && c <= 'Z');
 }
 
-static char* last_location;
-token_t next_token(char* data) {
+token_t _next_token(char* data) {
     static int current_index = 0;
+
+    token_t result;
+
+    if(data[current_index] == '\0') {
+        result.token_type = TK_EOF;
+        return result;
+    }
 
     bool should_ignore;
     do {
@@ -136,9 +150,6 @@ token_t next_token(char* data) {
         }
     } while(should_ignore);
 
-    last_location = data + current_index;
-
-    token_t result;
     char current_char = data[current_index];
 
     if(current_char == '\0') {
@@ -201,8 +212,40 @@ token_t next_token(char* data) {
         return result;
     }
 
-    fprintf(stderr, "Unidentified token at:\n%.*s", 10, last_location);
+    fprintf(stderr, "Unidentified token at:\n%.*s", 10, read_ptr);
     exit(2);
+}
+
+tokenizer_data_t init_tokenizer(char* input) {
+    tokenizer_data_t result;
+    result.input_stream = input;
+    result.current_token_index = 0;
+
+    for(int i = 0; i < TOKEN_BUFFER_SIZE; i++) {
+        result.token_buffer[i] = _next_token(input);
+    }
+
+    return result;
+}
+
+token_t look_ahead(tokenizer_data_t* data, int ahead) {
+    assert(ahead < TOKEN_BUFFER_SIZE);
+
+    int index = (data->current_token_index + ahead) % TOKEN_BUFFER_SIZE;
+    return data->token_buffer[index];
+}
+
+token_t current_token(tokenizer_data_t* data) {
+    return data->token_buffer[data->current_token_index];
+}
+
+token_t advance_token(tokenizer_data_t* data) {
+    // We will advance the circular buffer. The current index will become the
+    // end of the buffer, so we read a new token to this position.
+    data->token_buffer[data->current_token_index] = _next_token(data->input_stream);
+
+    data->current_token_index = (data->current_token_index + 1) % TOKEN_BUFFER_SIZE;
+    return current_token(data);
 }
 
 void fprint_token(FILE* file, token_t token) {
@@ -248,41 +291,25 @@ void expect(token_type_t expected, token_t value) {
         fprintf(stderr, "Got: ");
         fprint_token(stderr, value);
 
-        last_location[10] = '\0';
-        fprintf(stderr, "At: %s\n", last_location);
+        fprintf(stderr, "At: %s\n", value.token_str);
         exit(3);
     }
 }
 
-void parse_decl_or_struct_or_union(char* data, bool first_token_already_consumed) {
-    token_t token;
-    token = next_token(data);
-
-    if(token.token_type == '{') {
-        do {
-            token = next_token(data);
-        } while(token.token_type != '}');
-
-        token = next_token(data);
-        expect(';', token);
-    } else {
-        do {
-            token = next_token(data);
-        } while(token.token_type != ';');
-    }
-}
-
-void parse_declaration(char* data, bool first_token_already_consumed) {
+void parse_declaration(tokenizer_data_t* tokenizer,
+                       bool first_token_already_consumed) {
     token_t token;
     do {
-        token = next_token(data);
+        token = advance_token(tokenizer);
         if(token.token_type == TK_ID) {
             printf("Field: %.*s\n", (int) token.len, token.token_str);
         }
+
+        token = look_ahead(tokenizer, 1);
     } while(token.token_type != ';');
 }
 
-void parse_struct_or_union(char* data) {
+void parse_struct_or_union(tokenizer_data_t* tokenizer) {
     printf("In\n");
     // char tmp[101];
     // strncpy(tmp, last_location, 100);
@@ -292,33 +319,52 @@ void parse_struct_or_union(char* data) {
     token_t token;
     bool struct_end = false;
 
-    token = next_token(data);
+    token = advance_token(tokenizer);
     // NOTE(erick): named struct
     if(token.token_type == TK_ID) {
         printf("Struct name: %.*s\n", (int) token.len, token.token_str);
-        token = next_token(data);
+        token = advance_token(tokenizer);
     }
 
     expect('{', token);
 
     while(!struct_end) {
-        token = next_token(data);
+        token = advance_token(tokenizer);
 
         if(token.token_type == '}') { struct_end = true; }
 
         // NOTE(erick): Sub-struct
-        else if(token.token_type == TK_ID) { parse_declaration(data, true); }
+        else if(token.token_type == TK_ID) {
+            parse_declaration(tokenizer, true);
+            token = advance_token(tokenizer);
+            expect(';', token);
+        }
 
         else if(token.token_type == TK_STRUCT ||
                 token.token_type == TK_UNION) {
             // TODO(erick): We need a look-around to solve this more cleanly.
-            parse_decl_or_struct_or_union(data, true);
+            token_t one_ahead = look_ahead(tokenizer, 1);
+            if(one_ahead.token_type == '{') {
+                parse_struct_or_union(tokenizer);
 
-            // TODO(erick): This should not be done by the decl parser
-            // token = next_token(data, token_str);
-            // expect(';', token);
+            } else if(one_ahead.token_type == TK_ID) {
+                token_t two_ahead = look_ahead(tokenizer, 2);
+                if(two_ahead.token_type == '{') {
+                    parse_struct_or_union(tokenizer);
+                } else {
+                    parse_declaration(tokenizer, true);
+                }
+
+            } else {
+                fprintf(stderr, "Unexpected token at: %.*s\n", 10,
+                        one_ahead.token_str);
+            exit(3);
+            }
+
+            token = advance_token(tokenizer);
+            expect(';', token);
         } else {
-            fprintf(stderr, "Unexpected token at: %.*s\n", 10, last_location);
+            fprintf(stderr, "Unexpected token at: %.*s\n", 10, token.token_str);
             exit(3);
         }
     }
@@ -327,22 +373,23 @@ void parse_struct_or_union(char* data) {
 }
 
 void parse_file(char* data) {
+    tokenizer_data_t tokenizer = init_tokenizer(data);
     token_t token;
 
-    while((token = next_token(data)).token_type != TK_EOF) {
+    while((token = advance_token(&tokenizer)).token_type != TK_EOF) {
         if(token.token_type == TK_TYPEDEF) {
-            token = next_token(data);
+            token = advance_token(&tokenizer);
 
             if(token.token_type == TK_STRUCT ||
                token.token_type == TK_UNION)  {
 
-                parse_struct_or_union(data);
+                parse_struct_or_union(&tokenizer);
 
                 // Typedef'd name.
-                token = next_token(data);
+                token = advance_token(&tokenizer);
                 expect(TK_ID, token);
 
-                token = next_token(data);
+                token = advance_token(&tokenizer);
                 expect(';', token);
 
 
@@ -352,7 +399,7 @@ void parse_file(char* data) {
                 // Nothing to do. We will search for the ';'
             } else {
                 while(token.token_type != ';' && token.token_type != TK_EOF) {
-                    token = next_token(data);
+                    token = advance_token(&tokenizer);
                 }
             }
         }
