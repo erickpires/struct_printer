@@ -1,0 +1,16 @@
+
+struct_printer.c,639
+typedef int8_t int8;int89,141
+typedef int16_t int16;int1610,162
+typedef int32_t int32;int3211,185
+typedef int64_t int64;int6412,208
+typedef size_t   usize;usize14,232
+typedef uint8_t  uint8;uint815,256
+typedef uint16_t uint16;uint1616,280
+typedef uint32_t uint32;uint3217,305
+typedef uint64_t uint64;uint6418,330
+typedef unsigned int uint;uint19,355
+FILE* open_write_file_or_crash(char* filename) {open_write_file_or_crash22,384
+FILE* open_read_file_or_crash(char* filename) {open_read_file_or_crash37,738
+char* read_entire_file(FILE* file) {read_entire_file51,1059
+int main(int argc, char** argv) {main71,1595
